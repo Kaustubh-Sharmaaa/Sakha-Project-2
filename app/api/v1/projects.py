@@ -7,18 +7,22 @@ from app.core.auth import get_current_user
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
 
-def _v(val):
-    return val.id if hasattr(val, 'id') else val
+def _full(record_id) -> str:
+    """Convert RecordID or 'local' string to 'table:local' format."""
+    if hasattr(record_id, 'id'):
+        return f"{record_id.table_name}:{record_id.id}"
+    s = str(record_id)
+    if ':' in s:
+        return s
+    return f"project:{s}"
 
 
-def _uid(rid):
-    """Convert 'user:xxx' or 'xxx' → returns tuple of (table, local_id)."""
-    if hasattr(rid, 'id'):
-        return (rid.table_name, rid.id)
-    if ':' in str(rid):
-        parts = str(rid).split(':', 1)
-        return (parts[0], parts[1])
-    return (None, str(rid))
+def _local(record_id) -> str:
+    """Extract local id from RecordID or 'table:local' string."""
+    if hasattr(record_id, 'id'):
+        return record_id.id
+    s = str(record_id)
+    return s.split(':', 1)[1] if ':' in s else s
 
 
 @router.post("/", response_model=ProjectOut, status_code=201)
@@ -27,8 +31,8 @@ async def create_project(project_in: ProjectCreate, user: dict = Depends(get_cur
     if db is None:
         raise HTTPException(status_code=503, detail="Database not connected")
 
-    project_id = f"project:{uuid.uuid4().hex[:8]}"
-    result = await db.query(f"""
+    project_id = uuid.uuid4().hex[:8]   # LOCAL id only
+    await db.query(f"""
         CREATE project SET
             id = '{project_id}',
             name = '{project_in.name}',
@@ -36,15 +40,17 @@ async def create_project(project_in: ProjectCreate, user: dict = Depends(get_cur
             org_id = '{user['org_id']}',
             created_by = '{user['user_id']}',
             created_at = time::now()
-        RETURN AFTER
     """)
+    result = await db.query(
+        f"SELECT * FROM project WHERE id = project:{project_id} LIMIT 1"
+    )
     rec = result[0]
     return {
-        "id": _v(rec["id"]),
+        "id": _full(rec["id"]),
         "name": rec.get("name"),
         "description": rec.get("description"),
-        "org_id": _v(rec["org_id"]),
-        "created_by": _v(rec["created_by"]),
+        "org_id": _full(rec["org_id"]),
+        "created_by": _full(rec["created_by"]),
         "created_at": rec.get("created_at"),
     }
 
@@ -60,28 +66,15 @@ async def list_projects(user: dict = Depends(get_current_user)):
     )
     return [
         {
-            "id": _v(r["id"]),
+            "id": _full(r["id"]),
             "name": r.get("name"),
             "description": r.get("description"),
-            "org_id": _v(r["org_id"]),
-            "created_by": _v(r["created_by"]),
+            "org_id": _full(r["org_id"]),
+            "created_by": _full(r["created_by"]),
             "created_at": r.get("created_at"),
         }
         for r in result
     ]
-
-
-def _build_id_cond(field: str, record_id: str) -> str:
-    """
-    Build a SurrealDB WHERE id condition.
-    Handles both 'project:xxx' and 'xxx' formats.
-    Returns e.g. "id = project:abc" (unquoted record literal).
-    """
-    if ':' in record_id:
-        table, local = record_id.split(':', 1)
-        return f"{field} = {table}:{local}"
-    # Assume project table prefix
-    return f"{field} = project:{record_id}"
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -90,19 +83,19 @@ async def get_project(project_id: str, user: dict = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=503, detail="Database not connected")
 
-    id_cond = _build_id_cond("id", project_id)
+    local = project_id.split(':')[1] if ':' in project_id else project_id
     result = await db.query(
-        f"SELECT * FROM project WHERE {id_cond} AND org_id = '{user['org_id']}' LIMIT 1"
+        f"SELECT * FROM project WHERE id = project:{local} AND org_id = '{user['org_id']}' LIMIT 1"
     )
     if not result:
         raise HTTPException(status_code=404, detail="Project not found")
     rec = result[0]
     return {
-        "id": _v(rec["id"]),
+        "id": _full(rec["id"]),
         "name": rec.get("name"),
         "description": rec.get("description"),
-        "org_id": _v(rec["org_id"]),
-        "created_by": _v(rec["created_by"]),
+        "org_id": _full(rec["org_id"]),
+        "created_by": _full(rec["created_by"]),
         "created_at": rec.get("created_at"),
     }
 
@@ -122,21 +115,21 @@ async def update_project(project_id: str, update_in: ProjectUpdate, user: dict =
     if not sets:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    id_cond = _build_id_cond("id", project_id)
+    local = project_id.split(':')[1] if ':' in project_id else project_id
     result = await db.query(
         f"UPDATE project SET {', '.join(sets)} "
-        f"WHERE {id_cond} AND org_id = '{user['org_id']}' "
+        f"WHERE id = project:{local} AND org_id = '{user['org_id']}' "
         f"RETURN AFTER"
     )
     if not result:
         raise HTTPException(status_code=404, detail="Project not found")
     rec = result[0]
     return {
-        "id": _v(rec["id"]),
+        "id": _full(rec["id"]),
         "name": rec.get("name"),
         "description": rec.get("description"),
-        "org_id": _v(rec["org_id"]),
-        "created_by": _v(rec["created_by"]),
+        "org_id": _full(rec["org_id"]),
+        "created_by": _full(rec["created_by"]),
         "created_at": rec.get("created_at"),
     }
 
@@ -147,7 +140,7 @@ async def delete_project(project_id: str, user: dict = Depends(get_current_user)
     if db is None:
         raise HTTPException(status_code=503, detail="Database not connected")
 
-    id_cond = _build_id_cond("id", project_id)
+    local = project_id.split(':')[1] if ':' in project_id else project_id
     await db.query(
-        f"DELETE FROM project WHERE {id_cond} AND org_id = '{user['org_id']}'"
+        f"DELETE FROM project WHERE id = project:{local} AND org_id = '{user['org_id']}'"
     )

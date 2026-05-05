@@ -18,9 +18,14 @@ import uuid
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
-def _v(val):
-    """Extract string id from RecordID, or return val if already string."""
-    return val.id if hasattr(val, 'id') else val
+def _uid(record_id) -> str:
+    """Return LOCAL id (no table prefix) from a RecordID or 'table:local' string."""
+    if hasattr(record_id, 'id'):
+        return record_id.id  # RecordID.id is already local
+    s = str(record_id)
+    if ':' in s:
+        return s.split(':', 1)[1]
+    return s
 
 
 @router.post("/register", status_code=201)
@@ -35,27 +40,26 @@ async def register(user_in: UserCreate):
     if result:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    role = "admin" if not user_in.org_id else "user"
-    user_id = f"user:{uuid.uuid4().hex[:8]}"
-    org_id = user_in.org_id or f"org:{uuid.uuid4().hex[:8]}"
+    role = "user"
+    local_uid = uuid.uuid4().hex[:8]           # 'abc12345' — LOCAL id only
+    local_org = user_in.org_id or uuid.uuid4().hex[:8]  # 'org12345' — LOCAL only
 
-    create_result = await db.query(f"""
+    await db.query(f"""
         CREATE user SET
-            id = '{user_id}',
+            id = '{local_uid}',
             email = '{user_in.email}',
             name = '{user_in.name}',
             password_hash = '{get_password_hash(user_in.password)}',
-            org_id = '{org_id}',
+            org_id = '{local_org}',
             role = '{role}',
             created_at = time::now()
     """)
-    user = create_result[0]
     return {
-        "id": _v(user["id"]),
-        "email": user.get("email"),
-        "name": user.get("name"),
-        "org_id": _v(user["org_id"]),
-        "role": user.get("role"),
+        "id": f"user:{local_uid}",
+        "email": user_in.email,
+        "name": user_in.name,
+        "org_id": f"org:{local_org}",
+        "role": role,
     }
 
 
@@ -75,10 +79,12 @@ async def login(credentials: UserLogin):
     if not verify_password(credentials.password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
+    local_uid = _uid(user["id"])
+    local_org = _uid(user["org_id"])
     token_payload = {
-        "sub": _v(user["id"]),
+        "sub": local_uid,
         "email": user["email"],
-        "org_id": _v(user["org_id"]),
+        "org_id": local_org,
         "role": user["role"],
     }
     return TokenResponse(
@@ -92,14 +98,7 @@ async def refresh(req: RefreshRequest):
     payload = decode_token(req.refresh_token)
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-
-    new_payload = {
-        "sub": payload["sub"],
-        "email": payload["email"],
-        "org_id": payload["org_id"],
-        "role": payload["role"],
-    }
     return TokenResponse(
-        access_token=create_access_token(new_payload),
-        refresh_token=create_refresh_token(new_payload),
+        access_token=create_access_token(payload),
+        refresh_token=create_refresh_token(payload),
     )

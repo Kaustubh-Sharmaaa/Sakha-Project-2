@@ -7,23 +7,27 @@ from app.core.auth import get_current_user
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
 
-def _v(val):
-    return val.id if hasattr(val, 'id') else val
+def _full(record_id) -> str:
+    if hasattr(record_id, 'id'):
+        return f"{record_id.table_name}:{record_id.id}"
+    s = str(record_id)
+    return s if ':' in s else f"task:{s}"
 
 
-def _rec_id(rid: str, default_table: str) -> str:
-    """Build 'table:local' from 'xxx' or 'table:xxx' input."""
-    if ':' in rid:
-        t, local = rid.split(':', 1)
-        return f"{t}:{local}"
-    return f"{default_table}:{rid}"
+def _local(record_id, default_table: str) -> str:
+    if hasattr(record_id, 'id'):
+        return record_id.id
+    s = str(record_id)
+    if ':' in s:
+        return s.split(':', 1)[1]
+    return f"{default_table}:{s}"
 
 
-def _build_id_cond(field: str, record_id: str, default_table: str) -> str:
-    """Build a SurrealDB id WHERE condition using unquoted record literal."""
-    full = _rec_id(record_id, default_table)
-    table, local = full.split(':', 1)
-    return f"{field} = {table}:{local}"
+def _proj_local(project_id: str) -> str:
+    """Extract local project id from 'project:xxx' or 'xxx'."""
+    if ':' in project_id:
+        return project_id.split(':', 1)[1]
+    return project_id
 
 
 @router.post("/", response_model=TaskOut, status_code=201)
@@ -32,21 +36,21 @@ async def create_task(task_in: TaskCreate, user: dict = Depends(get_current_user
     if db is None:
         raise HTTPException(status_code=503, detail="Database not connected")
 
-    # Verify project belongs to the same org
-    proj_id_cond = _build_id_cond("id", task_in.project_id, "project")
+    proj_local = _proj_local(task_in.project_id)
     proj_result = await db.query(
-        f"SELECT id FROM project WHERE {proj_id_cond} AND org_id = '{user['org_id']}' LIMIT 1"
+        f"SELECT id FROM project WHERE id = project:{proj_local} AND org_id = '{user['org_id']}' LIMIT 1"
     )
     if not proj_result:
         raise HTTPException(status_code=404, detail="Project not found in your organization")
 
-    task_id = f"task:{uuid.uuid4().hex[:8]}"
+    task_local = uuid.uuid4().hex[:8]
+    task_in_proj_local = _proj_local(task_in.project_id)
     result = await db.query(f"""
         CREATE task SET
-            id = '{task_id}',
+            id = '{task_local}',
             title = '{task_in.title}',
             description = '{task_in.description or ''}',
-            project_id = '{task_in.project_id}',
+            project_id = '{task_in_proj_local}',
             org_id = '{user['org_id']}',
             status = '{task_in.status or 'todo'}',
             priority = '{task_in.priority or 'medium'}',
@@ -57,15 +61,15 @@ async def create_task(task_in: TaskCreate, user: dict = Depends(get_current_user
     """)
     rec = result[0]
     return {
-        "id": _v(rec["id"]),
+        "id": _full(rec["id"]),
         "title": rec.get("title"),
         "description": rec.get("description"),
-        "project_id": _v(rec["project_id"]),
-        "org_id": _v(rec["org_id"]),
+        "project_id": _full(rec["project_id"]),
+        "org_id": _full(rec["org_id"]),
         "status": rec.get("status"),
         "priority": rec.get("priority"),
         "assigned_to": rec.get("assigned_to"),
-        "created_by": _v(rec["created_by"]),
+        "created_by": _full(rec["created_by"]),
         "created_at": rec.get("created_at"),
     }
 
@@ -77,9 +81,9 @@ async def list_tasks(user: dict = Depends(get_current_user), project_id: str | N
         raise HTTPException(status_code=503, detail="Database not connected")
 
     if project_id:
-        pid_cond = _build_id_cond("project_id", project_id, "project")
+        proj_local = _proj_local(project_id)
         result = await db.query(
-            f"SELECT * FROM task WHERE org_id = '{user['org_id']}' AND {pid_cond}"
+            f"SELECT * FROM task WHERE org_id = '{user['org_id']}' AND project_id = project:{proj_local}"
         )
     else:
         result = await db.query(
@@ -87,15 +91,15 @@ async def list_tasks(user: dict = Depends(get_current_user), project_id: str | N
         )
     return [
         {
-            "id": _v(r["id"]),
+            "id": _full(r["id"]),
             "title": r.get("title"),
             "description": r.get("description"),
-            "project_id": _v(r["project_id"]),
-            "org_id": _v(r["org_id"]),
+            "project_id": _full(r["project_id"]),
+            "org_id": _full(r["org_id"]),
             "status": r.get("status"),
             "priority": r.get("priority"),
             "assigned_to": r.get("assigned_to"),
-            "created_by": _v(r["created_by"]),
+            "created_by": _full(r["created_by"]),
             "created_at": r.get("created_at"),
         }
         for r in result
@@ -108,23 +112,23 @@ async def get_task(task_id: str, user: dict = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=503, detail="Database not connected")
 
-    id_cond = _build_id_cond("id", task_id, "task")
+    local = task_id.split(':')[1] if ':' in task_id else task_id
     result = await db.query(
-        f"SELECT * FROM task WHERE {id_cond} AND org_id = '{user['org_id']}' LIMIT 1"
+        f"SELECT * FROM task WHERE id = task:{local} AND org_id = '{user['org_id']}' LIMIT 1"
     )
     if not result:
         raise HTTPException(status_code=404, detail="Task not found")
     rec = result[0]
     return {
-        "id": _v(rec["id"]),
+        "id": _full(rec["id"]),
         "title": rec.get("title"),
         "description": rec.get("description"),
-        "project_id": _v(rec["project_id"]),
-        "org_id": _v(rec["org_id"]),
+        "project_id": _full(rec["project_id"]),
+        "org_id": _full(rec["org_id"]),
         "status": rec.get("status"),
         "priority": rec.get("priority"),
         "assigned_to": rec.get("assigned_to"),
-        "created_by": _v(rec["created_by"]),
+        "created_by": _full(rec["created_by"]),
         "created_at": rec.get("created_at"),
     }
 
@@ -148,25 +152,25 @@ async def update_task(task_id: str, update_in: TaskUpdate, user: dict = Depends(
     if not sets:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    id_cond = _build_id_cond("id", task_id, "task")
+    local = task_id.split(':')[1] if ':' in task_id else task_id
     result = await db.query(
         f"UPDATE task SET {', '.join(sets)} "
-        f"WHERE {id_cond} AND org_id = '{user['org_id']}' "
+        f"WHERE id = task:{local} AND org_id = '{user['org_id']}' "
         f"RETURN AFTER"
     )
     if not result:
         raise HTTPException(status_code=404, detail="Task not found")
     rec = result[0]
     return {
-        "id": _v(rec["id"]),
+        "id": _full(rec["id"]),
         "title": rec.get("title"),
         "description": rec.get("description"),
-        "project_id": _v(rec["project_id"]),
-        "org_id": _v(rec["org_id"]),
+        "project_id": _full(rec["project_id"]),
+        "org_id": _full(rec["org_id"]),
         "status": rec.get("status"),
         "priority": rec.get("priority"),
         "assigned_to": rec.get("assigned_to"),
-        "created_by": _v(rec["created_by"]),
+        "created_by": _full(rec["created_by"]),
         "created_at": rec.get("created_at"),
     }
 
@@ -177,7 +181,7 @@ async def delete_task(task_id: str, user: dict = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=503, detail="Database not connected")
 
-    id_cond = _build_id_cond("id", task_id, "task")
+    local = task_id.split(':')[1] if ':' in task_id else task_id
     await db.query(
-        f"DELETE FROM task WHERE {id_cond} AND org_id = '{user['org_id']}'"
+        f"DELETE FROM task WHERE id = task:{local} AND org_id = '{user['org_id']}'"
     )

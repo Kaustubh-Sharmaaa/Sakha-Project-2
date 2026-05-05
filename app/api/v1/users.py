@@ -6,16 +6,11 @@ from app.core.auth import get_current_user, require_admin
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-def _v(val):
-    return val.id if hasattr(val, 'id') else val
-
-
-def _build_user_id_cond(record_id: str) -> str:
-    """Build SurrealDB id condition for user records."""
-    if ':' in record_id:
-        table, local = record_id.split(':', 1)
-        return f"id = {table}:{local}"
-    return f"id = user:{record_id}"
+def _full(record_id) -> str:
+    if hasattr(record_id, 'id'):
+        return f"{record_id.table_name}:{record_id.id}"
+    s = str(record_id)
+    return s if ':' in s else f"user:{s}"
 
 
 @router.get("/me", response_model=UserOut)
@@ -24,18 +19,17 @@ async def get_me(user: dict = Depends(get_current_user)):
     if db is None:
         raise HTTPException(status_code=503, detail="Database not connected")
 
-    id_cond = _build_user_id_cond(user["user_id"])
     result = await db.query(
-        f"SELECT * FROM user WHERE {id_cond} LIMIT 1"
+        f"SELECT * FROM user WHERE id = user:{user['user_id']} LIMIT 1"
     )
     if not result:
         raise HTTPException(status_code=404, detail="User not found")
     rec = result[0]
     return {
-        "id": _v(rec["id"]),
+        "id": _full(rec["id"]),
         "email": rec.get("email"),
         "name": rec.get("name"),
-        "org_id": _v(rec["org_id"]),
+        "org_id": _full(rec["org_id"]),
         "role": rec.get("role"),
         "created_at": rec.get("created_at"),
     }
@@ -52,10 +46,10 @@ async def list_users(user: dict = Depends(require_admin)):
     )
     return [
         {
-            "id": _v(r["id"]),
+            "id": _full(r["id"]),
             "email": r.get("email"),
             "name": r.get("name"),
-            "org_id": _v(r["org_id"]),
+            "org_id": _full(r["org_id"]),
             "role": r.get("role"),
             "created_at": r.get("created_at"),
         }
