@@ -1,37 +1,47 @@
 from datetime import datetime, timedelta
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-from .config import get_settings
+from typing import Optional
+import os
 
-settings = get_settings()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+ALGORITHM = "HS256"
+SECRET_KEY = os.getenv("SECRET_KEY", "sakha-secret-key-change-in-production-2024")
 
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def create_access_token(data: dict) -> str:
+def create_access_token(data: dict, expires_delta: timedelta = timedelta(hours=24)) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
-    to_encode.update({"exp": expire, "type": "access"})
-    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+    to_encode["exp"] = datetime.utcnow() + expires_delta
+    to_encode["type"] = "access"
+    return _create_jwt(to_encode)
 
 
 def create_refresh_token(data: dict) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=settings.refresh_token_expire_days)
-    to_encode.update({"exp": expire, "type": "refresh"})
-    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+    to_encode["exp"] = datetime.utcnow() + timedelta(days=7)
+    to_encode["type"] = "refresh"
+    return _create_jwt(to_encode)
 
 
-def decode_token(token: str) -> dict | None:
+def _create_jwt(data: dict) -> str:
+    import jwt
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> Optional[dict]:
+    import jwt
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except JWTError:
+    except jwt.PyJWTError:
         return None
+
+
+def get_password_hash(password: str) -> str:
+    import bcrypt
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    import bcrypt
+    try:
+        return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
+    except Exception:
+        return False

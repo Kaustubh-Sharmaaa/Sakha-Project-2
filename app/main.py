@@ -4,7 +4,6 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
-from app.core.tenant import TenantMiddleware
 from app.db.surrealdb import init_db
 from app.api.v1 import auth, users, projects, tasks
 
@@ -42,9 +41,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Tenant + Auth middleware
-app.add_middleware(TenantMiddleware)
 
 # Global exception handler
 @app.exception_handler(Exception)
