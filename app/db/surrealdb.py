@@ -8,6 +8,7 @@ db = None
 async def init_db():
     global db
     db = surrealdb.AsyncSurreal(settings.surrealdb_url)
+    await db.connect()
     await db.use("test", "test")
     return db
 

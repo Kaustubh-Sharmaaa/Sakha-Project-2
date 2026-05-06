@@ -10,7 +10,6 @@ from app.core.security import (
 from app.models.schemas import (
     UserCreate,
     UserLogin,
-    TokenResponse,
     RefreshRequest,
 )
 import uuid
@@ -40,9 +39,11 @@ async def register(user_in: UserCreate):
     if result:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    role = "user"
-    local_uid = uuid.uuid4().hex[:8]           # 'abc12345' — LOCAL id only
-    local_org = user_in.org_id or uuid.uuid4().hex[:8]  # 'org12345' — LOCAL only
+    local_uid = uuid.uuid4().hex[:8]
+    is_new_org = not user_in.org_id
+    local_org = user_in.org_id or uuid.uuid4().hex[:8]
+    # First user creating a new org becomes admin
+    role = "admin" if is_new_org else "user"
 
     await db.query(f"""
         CREATE user SET
@@ -55,15 +56,18 @@ async def register(user_in: UserCreate):
             created_at = time::now()
     """)
     return {
-        "id": f"user:{local_uid}",
-        "email": user_in.email,
-        "name": user_in.name,
-        "org_id": f"org:{local_org}",
-        "role": role,
+        "success": True,
+        "data": {
+            "id": f"user:{local_uid}",
+            "email": user_in.email,
+            "name": user_in.name,
+            "org_id": local_org,
+            "role": role,
+        }
     }
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login")
 async def login(credentials: UserLogin):
     db = await get_db()
     if db is None:
@@ -87,18 +91,31 @@ async def login(credentials: UserLogin):
         "org_id": local_org,
         "role": user["role"],
     }
-    return TokenResponse(
-        access_token=create_access_token(token_payload),
-        refresh_token=create_refresh_token(token_payload),
-    )
+    return {
+        "success": True,
+        "data": {
+            "token": create_access_token(token_payload),
+            "refresh_token": create_refresh_token(token_payload),
+            "user": {
+                "id": f"user:{local_uid}",
+                "name": user.get("name"),
+                "email": user["email"],
+                "role": user["role"],
+                "orgId": local_org,
+            },
+        }
+    }
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post("/refresh")
 async def refresh(req: RefreshRequest):
     payload = decode_token(req.refresh_token)
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-    return TokenResponse(
-        access_token=create_access_token(payload),
-        refresh_token=create_refresh_token(payload),
-    )
+    return {
+        "success": True,
+        "data": {
+            "token": create_access_token(payload),
+            "refresh_token": create_refresh_token(payload),
+        }
+    }
